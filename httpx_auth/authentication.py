@@ -1,3 +1,4 @@
+import abc
 import base64
 import os
 import uuid
@@ -86,8 +87,29 @@ def request_new_grant_with_post(
     return token, content.get("expires_in")
 
 
-class OAuth2:
+class OAuth2(abc.ABC, httpx.Auth):
     token_cache = oauth2_tokens.TokenMemoryCache()
+    state: Optional[str] = None
+    early_expiry: float
+
+    def auth_flow(
+            self, request: httpx.Request
+    ) -> Generator[httpx.Request, httpx.Response, None]:
+        token = OAuth2.token_cache.get_token(
+            self.state,
+            early_expiry=self.early_expiry,
+            on_missing_token=self.request_new_token,
+        )
+        self._update_user_request(request, token)
+        yield request
+
+    @abc.abstractmethod
+    def request_new_token(self) -> Union[tuple[str, str], tuple[str, str, int]]:
+        pass  # pragma: no cover
+
+    @abc.abstractmethod
+    def _update_user_request(self, request: httpx.Request, token: str) -> None:
+        pass  # pragma: no cover
 
 
 class SupportMultiAuth:
@@ -136,7 +158,7 @@ class BrowserAuth:
         )
 
 
-class OAuth2ResourceOwnerPasswordCredentials(httpx.Auth, SupportMultiAuth):
+class OAuth2ResourceOwnerPasswordCredentials(OAuth2, SupportMultiAuth):
     """
     Resource Owner Password Credentials Grant
 
@@ -168,6 +190,8 @@ class OAuth2ResourceOwnerPasswordCredentials(httpx.Auth, SupportMultiAuth):
         Use it to provide a custom proxying rule for instance.
         :param kwargs: all additional authorization parameters that should be put as body parameters in the token URL.
         """
+        super().__init__()
+
         self.token_url = token_url
         if not self.token_url:
             raise Exception("Token URL is mandatory.")
@@ -205,16 +229,8 @@ class OAuth2ResourceOwnerPasswordCredentials(httpx.Auth, SupportMultiAuth):
         all_parameters_in_url = _add_parameters(self.token_url, self.data)
         self.state = sha512(all_parameters_in_url.encode("unicode_escape")).hexdigest()
 
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
-        token = OAuth2.token_cache.get_token(
-            self.state,
-            early_expiry=self.early_expiry,
-            on_missing_token=self.request_new_token,
-        )
+    def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
-        yield request
 
     def request_new_token(self) -> tuple:
         client = self.client or httpx.Client()
@@ -237,7 +253,7 @@ class OAuth2ResourceOwnerPasswordCredentials(httpx.Auth, SupportMultiAuth):
         client.timeout = self.timeout
 
 
-class OAuth2ClientCredentials(httpx.Auth, SupportMultiAuth):
+class OAuth2ClientCredentials(OAuth2, SupportMultiAuth):
     """
     Client Credentials Grant
 
@@ -276,6 +292,8 @@ class OAuth2ClientCredentials(httpx.Auth, SupportMultiAuth):
         if not self.client_secret:
             raise Exception("client_secret is mandatory.")
 
+        super().__init__()
+
         self.header_name = kwargs.pop("header_name", None) or "Authorization"
         self.header_value = kwargs.pop("header_value", None) or "Bearer {token}"
         if "{token}" not in self.header_value:
@@ -299,16 +317,8 @@ class OAuth2ClientCredentials(httpx.Auth, SupportMultiAuth):
         all_parameters_in_url = _add_parameters(self.token_url, self.data)
         self.state = sha512(all_parameters_in_url.encode("unicode_escape")).hexdigest()
 
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
-        token = OAuth2.token_cache.get_token(
-            self.state,
-            early_expiry=self.early_expiry,
-            on_missing_token=self.request_new_token,
-        )
+    def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
-        yield request
 
     def request_new_token(self) -> tuple:
         client = self.client or httpx.Client()
@@ -330,7 +340,7 @@ class OAuth2ClientCredentials(httpx.Auth, SupportMultiAuth):
         client.timeout = self.timeout
 
 
-class OAuth2AuthorizationCode(httpx.Auth, SupportMultiAuth, BrowserAuth):
+class OAuth2AuthorizationCode(OAuth2, SupportMultiAuth, BrowserAuth):
     """
     Authorization Code Grant
 
@@ -389,7 +399,7 @@ class OAuth2AuthorizationCode(httpx.Auth, SupportMultiAuth, BrowserAuth):
         if not self.token_url:
             raise Exception("Token URL is mandatory.")
 
-        BrowserAuth.__init__(self, kwargs)
+        super().__init__(kwargs)
 
         self.header_name = kwargs.pop("header_name", None) or "Authorization"
         self.header_value = kwargs.pop("header_value", None) or "Bearer {token}"
@@ -447,16 +457,8 @@ class OAuth2AuthorizationCode(httpx.Auth, SupportMultiAuth, BrowserAuth):
         }
         self.token_data.update(kwargs)
 
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
-        token = OAuth2.token_cache.get_token(
-            self.state,
-            early_expiry=self.early_expiry,
-            on_missing_token=self.request_new_token,
-        )
+    def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
-        yield request
 
     def request_new_token(self) -> tuple:
         # Request code
@@ -486,7 +488,7 @@ class OAuth2AuthorizationCode(httpx.Auth, SupportMultiAuth, BrowserAuth):
         client.timeout = self.timeout
 
 
-class OAuth2AuthorizationCodePKCE(httpx.Auth, SupportMultiAuth, BrowserAuth):
+class OAuth2AuthorizationCodePKCE(OAuth2, SupportMultiAuth, BrowserAuth):
     """
     Proof Key for Code Exchange
 
@@ -543,7 +545,7 @@ class OAuth2AuthorizationCodePKCE(httpx.Auth, SupportMultiAuth, BrowserAuth):
         if not self.token_url:
             raise Exception("Token URL is mandatory.")
 
-        BrowserAuth.__init__(self, kwargs)
+        super().__init__(kwargs)
 
         self.client = kwargs.pop("client", None)
 
@@ -612,16 +614,8 @@ class OAuth2AuthorizationCodePKCE(httpx.Auth, SupportMultiAuth, BrowserAuth):
         }
         self.token_data.update(kwargs)
 
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
-        token = OAuth2.token_cache.get_token(
-            self.state,
-            early_expiry=self.early_expiry,
-            on_missing_token=self.request_new_token,
-        )
+    def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
-        yield request
 
     def request_new_token(self) -> tuple:
         # Request code
@@ -682,7 +676,7 @@ class OAuth2AuthorizationCodePKCE(httpx.Auth, SupportMultiAuth, BrowserAuth):
         return base64.urlsafe_b64encode(digest).rstrip(b"=")
 
 
-class OAuth2Implicit(httpx.Auth, SupportMultiAuth, BrowserAuth):
+class OAuth2Implicit(OAuth2, SupportMultiAuth, BrowserAuth):
     """
     Implicit Grant
 
@@ -732,7 +726,7 @@ class OAuth2Implicit(httpx.Auth, SupportMultiAuth, BrowserAuth):
         if not self.authorization_url:
             raise Exception("Authorization URL is mandatory.")
 
-        BrowserAuth.__init__(self, kwargs)
+        super().__init__(kwargs)
 
         self.header_name = kwargs.pop("header_name", None) or "Authorization"
         self.header_value = kwargs.pop("header_value", None) or "Bearer {token}"
@@ -778,18 +772,11 @@ class OAuth2Implicit(httpx.Auth, SupportMultiAuth, BrowserAuth):
             self.redirect_uri_port,
         )
 
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
-        token = OAuth2.token_cache.get_token(
-            self.state,
-            early_expiry=self.early_expiry,
-            on_missing_token=oauth2_authentication_responses_server.request_new_grant,
-            grant_details=self.grant_details,
-        )
+    def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
-        yield request
 
+    def request_new_token(self) -> tuple[str, str]:
+        return oauth2_authentication_responses_server.request_new_grant(self.grant_details)
 
 class AzureActiveDirectoryImplicit(OAuth2Implicit):
     """
