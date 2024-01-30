@@ -5,6 +5,7 @@ import jwt
 
 import httpx_auth
 import httpx_auth.errors
+from httpx_auth.testing import get_token
 
 
 @pytest.fixture
@@ -24,12 +25,12 @@ def test_add_bearer_tokens(token_cache):
     token_cache._add_bearer_token("key2", token2)
 
     # Assert that tokens can be retrieved properly even after other token were inserted
-    assert token_cache.get_token("key1") == token1
-    assert token_cache.get_token("key2") == token2
+    assert get_token(token_cache.get_token("key1")) == token1
+    assert get_token(token_cache.get_token("key2")) == token2
 
     # Assert that tokens are not removed from the cache on retrieval
-    assert token_cache.get_token("key1") == token1
-    assert token_cache.get_token("key2") == token2
+    assert get_token(token_cache.get_token("key1")) == token1
+    assert get_token(token_cache.get_token("key2")) == token2
 
 
 def test_save_bearer_tokens(token_cache, request):
@@ -42,8 +43,8 @@ def test_save_bearer_tokens(token_cache, request):
     token_cache._add_bearer_token("key2", token2)
 
     same_cache = httpx_auth.JsonTokenFileCache(request.node.name + ".cache")
-    assert same_cache.get_token("key1") == token1
-    assert same_cache.get_token("key2") == token2
+    assert get_token(same_cache.get_token("key1")) == token1
+    assert get_token(same_cache.get_token("key2")) == token2
 
 
 def test_save_bearer_token_exception_handling(token_cache, request, monkeypatch):
@@ -60,19 +61,24 @@ def test_save_bearer_token_exception_handling(token_cache, request, monkeypatch)
 
     same_cache = httpx_auth.JsonTokenFileCache(request.node.name + ".cache")
     with pytest.raises(httpx_auth.AuthenticationFailed) as exception_info:
-        same_cache.get_token("key1")
+        get_token(same_cache.get_token("key1"))
     assert str(exception_info.value) == "User was not authenticated."
 
 
 def test_missing_token(token_cache):
     with pytest.raises(httpx_auth.AuthenticationFailed):
-        token_cache.get_token("key1")
+        get_token(token_cache.get_token("key1"))
 
 
 def test_missing_token_function(token_cache):
     expiry_in_1_hour = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     token = jwt.encode({"exp": expiry_in_1_hour}, "secret")
-    retrieved_token = token_cache.get_token(
-        "key1", on_missing_token=lambda: ("key1", token)
-    )
+
+    def on_missing_token():
+        yield from ()
+        return "key1", token
+
+    retrieved_token = get_token(token_cache.get_token(
+        "key1", on_missing_token=on_missing_token
+    ))
     assert retrieved_token == token

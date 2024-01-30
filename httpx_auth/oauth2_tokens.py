@@ -4,7 +4,9 @@ import os
 import datetime
 import threading
 import logging
-from typing import Union
+from typing import Union, Generator, Callable
+
+import httpx
 
 from httpx_auth.errors import InvalidToken, TokenExpiryNotProvided, AuthenticationFailed
 
@@ -96,9 +98,13 @@ class TokenMemoryCache:
         key: str,
         *,
         early_expiry: float = 30.0,
-        on_missing_token=None,
+        on_missing_token: Callable[..., Generator[
+            httpx.Request,
+            httpx.Response,
+            Union[tuple[str, str, int], tuple[str, str]]
+        ]] = None,
         **on_missing_token_kwargs,
-    ) -> str:
+    ) -> Generator[httpx.Request, httpx.Response, str]:
         """
         Return the bearer token.
         :param key: key identifier of the token
@@ -130,7 +136,7 @@ class TokenMemoryCache:
         logger.debug("Token cannot be found in cache.")
         if on_missing_token is not None:
             with self.forbid_concurrent_missing_token_function_call:
-                new_token = on_missing_token(**on_missing_token_kwargs)
+                new_token = yield from on_missing_token(**on_missing_token_kwargs)
                 if len(new_token) == 2:  # Bearer token
                     state, token = new_token
                     self._add_bearer_token(state, token)

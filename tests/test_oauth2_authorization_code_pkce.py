@@ -12,10 +12,10 @@ from httpx_auth.testing import BrowserMock, browser_mock, token_cache
 def test_oauth2_pkce_flow_uses_provided_client(
     token_cache, httpx_mock: HTTPXMock, monkeypatch, browser_mock: BrowserMock
 ):
-    client = httpx.Client(headers={"x-test": "Test value"})
+    client_auth = httpx_auth.HeaderApiKey(header_name="x-test", api_key="Test value")
     monkeypatch.setattr(httpx_auth.authentication.os, "urandom", lambda x: b"1" * 63)
     auth = httpx_auth.OAuth2AuthorizationCodePKCE(
-        "https://provide_code", "https://provide_access_token", client=client
+        "https://provide_code", "https://provide_access_token", client_auth=client_auth
     )
     tab = browser_mock.add_response(
         opened_url="https://provide_code?response_type=code&state=ce9c755b41b5e3c5b64c70598715d5de271023a53f39a67a70215d265d11d2bfb6ef6e9c701701e998e69cbdbf2cee29fd51d2a950aa05f59a20cf4a646099d5&redirect_uri=http%3A%2F%2Flocalhost%3A5000%2F&code_challenge=5C_ph_KZ3DstYUc965SiqmKAA-ShvKF4Ut7daKd3fjc&code_challenge_method=S256",
@@ -46,10 +46,10 @@ def test_oauth2_pkce_flow_uses_provided_client(
 def test_oauth2_pkce_flow_is_able_to_reuse_client(
     token_cache, httpx_mock: HTTPXMock, monkeypatch, browser_mock: BrowserMock
 ):
-    client = httpx.Client(headers={"x-test": "Test value"})
+    client_auth = httpx_auth.HeaderApiKey(header_name="x-test", api_key="Test value")
     monkeypatch.setattr(httpx_auth.authentication.os, "urandom", lambda x: b"1" * 63)
     auth = httpx_auth.OAuth2AuthorizationCodePKCE(
-        "https://provide_code", "https://provide_access_token", client=client
+        "https://provide_code", "https://provide_access_token", client_auth=client_auth
     )
     tab = browser_mock.add_response(
         opened_url="https://provide_code?response_type=code&state=ce9c755b41b5e3c5b64c70598715d5de271023a53f39a67a70215d265d11d2bfb6ef6e9c701701e998e69cbdbf2cee29fd51d2a950aa05f59a20cf4a646099d5&redirect_uri=http%3A%2F%2Flocalhost%3A5000%2F&code_challenge=5C_ph_KZ3DstYUc965SiqmKAA-ShvKF4Ut7daKd3fjc&code_challenge_method=S256",

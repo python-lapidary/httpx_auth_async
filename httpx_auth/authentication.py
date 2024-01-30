@@ -4,12 +4,13 @@ import os
 import uuid
 from hashlib import sha256, sha512
 from urllib.parse import parse_qs, urlsplit, urlunsplit, urlencode
-from typing import Optional, Generator, Union, Iterable
+from typing import Optional, Generator, Union, Iterable, cast, Any
 
 import httpx
 
+import httpx_auth
 from httpx_auth import oauth2_authentication_responses_server, oauth2_tokens
-from httpx_auth.errors import InvalidGrantRequest, GrantNotProvided
+from httpx_auth.errors import InvalidGrantRequest, GrantNotProvided,AuthenticationFailed
 
 
 def _add_parameters(initial_url: str, extra_parameters: dict) -> str:
@@ -72,9 +73,9 @@ def _content_from_response(response: httpx.Response) -> dict:
 
 
 def request_new_grant_with_post(
-    url: str, data, grant_name: str, client: httpx.Client
-) -> (str, int):
-    response = client.post(url, data=data)
+    url: str, data, grant_name: str
+) -> Generator[httpx.Request, httpx.Response, tuple[str, int]]:
+    response = yield httpx.Request('post', url, data=data)
 
     if response.is_error:
         # As described in https://tools.ietf.org/html/rfc6749#section-5.2
@@ -91,20 +92,59 @@ class OAuth2(abc.ABC, httpx.Auth):
     token_cache = oauth2_tokens.TokenMemoryCache()
     state: Optional[str] = None
     early_expiry: float
+    client_auth: httpx.Auth
+
+    def __init__(self, kwargs: dict[str, Any]):
+        client_auth = kwargs.pop("client_auth", None)
+        if client_auth is None:
+            self.client_auth = httpx.Auth()
+        elif isinstance(client_auth, tuple):
+            self.client_auth = httpx_auth.Basic(*cast(tuple, client_auth))
+        elif isinstance(client_auth, httpx.Auth):
+            self.client_auth = client_auth
+        else:
+            raise TypeError('client_auth')
+        self.requires_response_body = True
 
     def auth_flow(
-            self, request: httpx.Request
+        self, request: httpx.Request
     ) -> Generator[httpx.Request, httpx.Response, None]:
-        token = OAuth2.token_cache.get_token(
+        gen = OAuth2.token_cache.get_token(
             self.state,
             early_expiry=self.early_expiry,
             on_missing_token=self.request_new_token,
         )
+
+        try:
+            auth_req = next(gen)
+            while True:
+                # meta auth - add auth headers to OAuth2 requests
+                meta_auth_flow = self.client_auth.auth_flow(auth_req)
+                meta_auth_req = next(meta_auth_flow)
+                while True:
+                    if meta_auth_req is auth_req:
+                        break
+                    meta_auth_resp = yield meta_auth_req
+                    try:
+                        meta_auth_req = meta_auth_flow.send(meta_auth_resp)
+                    except StopIteration as e:
+                        raise AuthenticationFailed() from e
+
+                auth_resp = yield auth_req
+                if self.requires_response_body:
+                    auth_resp.read()
+                auth_req = gen.send(auth_resp)
+        except StopIteration as e:
+            token = e.value
+        assert token
+
         self._update_user_request(request, token)
         yield request
 
     @abc.abstractmethod
-    def request_new_token(self) -> Union[tuple[str, str], tuple[str, str, int]]:
+    def request_new_token(self) -> Generator[
+        httpx.Request, httpx.Response, Union[tuple[str, str], tuple[str, str, int]]
+    ]:
         pass  # pragma: no cover
 
     @abc.abstractmethod
@@ -190,7 +230,7 @@ class OAuth2ResourceOwnerPasswordCredentials(OAuth2, SupportMultiAuth):
         Use it to provide a custom proxying rule for instance.
         :param kwargs: all additional authorization parameters that should be put as body parameters in the token URL.
         """
-        super().__init__()
+        OAuth2.__init__(self, kwargs)
 
         self.token_url = token_url
         if not self.token_url:
@@ -212,8 +252,6 @@ class OAuth2ResourceOwnerPasswordCredentials(OAuth2, SupportMultiAuth):
 
         # Time is expressed in seconds
         self.timeout = int(kwargs.pop("timeout", None) or 60)
-        self.client = kwargs.pop("client", None)
-        self.client_auth = kwargs.pop("client_auth", None)
 
         # As described in https://tools.ietf.org/html/rfc6749#section-4.3.2
         self.data = {
@@ -232,25 +270,15 @@ class OAuth2ResourceOwnerPasswordCredentials(OAuth2, SupportMultiAuth):
     def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
 
-    def request_new_token(self) -> tuple:
-        client = self.client or httpx.Client()
-        self._configure_client(client)
-        try:
-            # As described in https://tools.ietf.org/html/rfc6749#section-4.3.3
-            token, expires_in = request_new_grant_with_post(
-                self.token_url, self.data, self.token_field_name, client
-            )
-        finally:
-            # Close client only if it was created by this module
-            if self.client is None:
-                client.close()
+    def request_new_token(
+        self
+    ) -> Generator[httpx.Request, httpx.Response, Union[tuple[str, str, int], tuple[str, str]]]:
+        # As described in https://tools.ietf.org/html/rfc6749#section-4.3.3
+        token, expires_in = yield from request_new_grant_with_post(
+            self.token_url, self.data, self.token_field_name
+        )
         # Handle both Access and Bearer tokens
         return (self.state, token, expires_in) if expires_in else (self.state, token)
-
-    def _configure_client(self, client: httpx.Client):
-        if self.client_auth:
-            client.auth = self.client_auth
-        client.timeout = self.timeout
 
 
 class OAuth2ClientCredentials(OAuth2, SupportMultiAuth):
@@ -292,7 +320,7 @@ class OAuth2ClientCredentials(OAuth2, SupportMultiAuth):
         if not self.client_secret:
             raise Exception("client_secret is mandatory.")
 
-        super().__init__()
+        OAuth2.__init__(self, kwargs)
 
         self.header_name = kwargs.pop("header_name", None) or "Authorization"
         self.header_value = kwargs.pop("header_value", None) or "Bearer {token}"
@@ -320,18 +348,13 @@ class OAuth2ClientCredentials(OAuth2, SupportMultiAuth):
     def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
 
-    def request_new_token(self) -> tuple:
-        client = self.client or httpx.Client()
-        self._configure_client(client)
-        try:
-            # As described in https://tools.ietf.org/html/rfc6749#section-4.4.3
-            token, expires_in = request_new_grant_with_post(
-                self.token_url, self.data, self.token_field_name, client
-            )
-        finally:
-            # Close client only if it was created by this module
-            if self.client is None:
-                client.close()
+    def request_new_token(self) -> Generator[
+        httpx.Request, httpx.Response, Union[tuple[str, str], tuple[str, str, int]]
+    ]:
+        # As described in https://tools.ietf.org/html/rfc6749#section-4.4.3
+        token, expires_in = yield from request_new_grant_with_post(
+            self.token_url, self.data, self.token_field_name
+        )
         # Handle both Access and Bearer tokens
         return (self.state, token, expires_in) if expires_in else (self.state, token)
 
@@ -399,7 +422,7 @@ class OAuth2AuthorizationCode(OAuth2, SupportMultiAuth, BrowserAuth):
         if not self.token_url:
             raise Exception("Token URL is mandatory.")
 
-        super().__init__(kwargs)
+        BrowserAuth.__init__(self, kwargs)
 
         self.header_name = kwargs.pop("header_name", None) or "Authorization"
         self.header_value = kwargs.pop("header_value", None) or "Bearer {token}"
@@ -411,8 +434,8 @@ class OAuth2AuthorizationCode(OAuth2, SupportMultiAuth, BrowserAuth):
 
         username = kwargs.pop("username", None)
         password = kwargs.pop("password", None)
-        self.auth = (username, password) if username and password else None
-        self.client = kwargs.pop("client", None)
+        client_auth = httpx_auth.Basic(username, password) if username and password else None
+        OAuth2.__init__(self, {'client_auth': client_auth})
 
         # As described in https://tools.ietf.org/html/rfc6749#section-4.1.2
         code_field_name = kwargs.pop("code_field_name", "code")
@@ -460,7 +483,9 @@ class OAuth2AuthorizationCode(OAuth2, SupportMultiAuth, BrowserAuth):
     def _update_user_request(self, request: httpx.Request, token: str) -> None:
         request.headers[self.header_name] = self.header_value.format(token=token)
 
-    def request_new_token(self) -> tuple:
+    def request_new_token(self) -> Generator[
+        httpx.Request, httpx.Response, Union[tuple[str, str], tuple[str, str, int]]
+    ]:
         # Request code
         state, code = oauth2_authentication_responses_server.request_new_grant(
             self.code_grant_details
@@ -469,23 +494,12 @@ class OAuth2AuthorizationCode(OAuth2, SupportMultiAuth, BrowserAuth):
         # As described in https://tools.ietf.org/html/rfc6749#section-4.1.3
         self.token_data["code"] = code
 
-        client = self.client or httpx.Client()
-        self._configure_client(client)
-        try:
-            # As described in https://tools.ietf.org/html/rfc6749#section-4.1.4
-            token, expires_in = request_new_grant_with_post(
-                self.token_url, self.token_data, self.token_field_name, client
-            )
-        finally:
-            # Close client only if it was created by this module
-            if self.client is None:
-                client.close()
+        # As described in https://tools.ietf.org/html/rfc6749#section-4.1.4
+        token, expires_in = yield from request_new_grant_with_post(
+            self.token_url, self.token_data, self.token_field_name
+        )
         # Handle both Access and Bearer tokens
         return (self.state, token, expires_in) if expires_in else (self.state, token)
-
-    def _configure_client(self, client: httpx.Client):
-        client.auth = self.auth
-        client.timeout = self.timeout
 
 
 class OAuth2AuthorizationCodePKCE(OAuth2, SupportMultiAuth, BrowserAuth):
@@ -545,7 +559,8 @@ class OAuth2AuthorizationCodePKCE(OAuth2, SupportMultiAuth, BrowserAuth):
         if not self.token_url:
             raise Exception("Token URL is mandatory.")
 
-        super().__init__(kwargs)
+        OAuth2.__init__(self, kwargs)
+        BrowserAuth.__init__(self, kwargs)
 
         self.client = kwargs.pop("client", None)
 
@@ -626,22 +641,13 @@ class OAuth2AuthorizationCodePKCE(OAuth2, SupportMultiAuth, BrowserAuth):
         # As described in https://tools.ietf.org/html/rfc6749#section-4.1.3
         self.token_data["code"] = code
 
-        client = self.client or httpx.Client()
-        self._configure_client(client)
-        try:
-            # As described in https://tools.ietf.org/html/rfc6749#section-4.1.4
-            token, expires_in = request_new_grant_with_post(
-                self.token_url, self.token_data, self.token_field_name, client
-            )
-        finally:
-            # Close client only if it was created by this module
-            if self.client is None:
-                client.close()
+        # As described in https://tools.ietf.org/html/rfc6749#section-4.1.4
+        token, expires_in = yield from request_new_grant_with_post(
+            self.token_url, self.token_data, self.token_field_name
+        )
+
         # Handle both Access and Bearer tokens
         return (self.state, token, expires_in) if expires_in else (self.state, token)
-
-    def _configure_client(self, client: httpx.Client):
-        client.timeout = self.timeout
 
     @staticmethod
     def generate_code_verifier() -> bytes:
@@ -726,7 +732,8 @@ class OAuth2Implicit(OAuth2, SupportMultiAuth, BrowserAuth):
         if not self.authorization_url:
             raise Exception("Authorization URL is mandatory.")
 
-        super().__init__(kwargs)
+        OAuth2.__init__(self, kwargs)
+        BrowserAuth.__init__(self, kwargs)
 
         self.header_name = kwargs.pop("header_name", None) or "Authorization"
         self.header_value = kwargs.pop("header_value", None) or "Bearer {token}"
@@ -776,7 +783,9 @@ class OAuth2Implicit(OAuth2, SupportMultiAuth, BrowserAuth):
         request.headers[self.header_name] = self.header_value.format(token=token)
 
     def request_new_token(self) -> tuple[str, str]:
+        yield from ()
         return oauth2_authentication_responses_server.request_new_grant(self.grant_details)
+
 
 class AzureActiveDirectoryImplicit(OAuth2Implicit):
     """
@@ -1263,12 +1272,16 @@ class OktaResourceOwnerPasswordCredentials(OAuth2ResourceOwnerPasswordCredential
         authorization_server = kwargs.pop("authorization_server", None) or "default"
         scopes = kwargs.pop("scope", "openid")
         kwargs["scope"] = " ".join(scopes) if isinstance(scopes, list) else scopes
-        OAuth2ResourceOwnerPasswordCredentials.__init__(
-            self,
+
+        client_auth = httpx_auth.Basic(client_id, client_secret)
+        if 'client_auth' in kwargs:
+            client_auth += kwargs.pop('client_auth')
+
+        super().__init__(
             f"https://{instance}/oauth2/{authorization_server}/v1/token",
             username=username,
             password=password,
-            client_auth=(client_id, client_secret),
+            client_auth=client_auth,
             **kwargs,
         )
 
@@ -1332,7 +1345,17 @@ class _MultiAuth(httpx.Auth):
         self, request: httpx.Request
     ) -> Generator[httpx.Request, httpx.Response, None]:
         for authentication_mode in self.authentication_modes:
-            next(authentication_mode.auth_flow(request))
+            # auth_flow may yield one or more requests, the last of which is the user request with added auth headers
+            flow = authentication_mode.auth_flow(request)
+            req = next(flow)
+            while True:
+                if req is request:
+                    break
+                auth_resp = yield req
+                if self.requires_response_body:
+                    auth_resp.read()
+                req = flow.send(auth_resp)
+
         yield request
 
     def __add__(self, other) -> "_MultiAuth":

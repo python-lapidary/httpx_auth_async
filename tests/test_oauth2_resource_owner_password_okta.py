@@ -12,14 +12,14 @@ from httpx_auth.testing import token_cache
 def test_oauth2_password_credentials_flow_uses_provided_client(
     token_cache, httpx_mock: HTTPXMock
 ):
-    client = httpx.Client(headers={"x-test": "Test value"})
+    client_auth = httpx_auth.HeaderApiKey(header_name="x-test", api_key="Test value")
     auth = httpx_auth.OktaResourceOwnerPasswordCredentials(
         "testserver.okta-emea.com",
         username="test_user",
         password="test_pwd",
         client_id="test_user2",
         client_secret="test_pwd2",
-        client=client,
+        client_auth=client_auth,
     )
     httpx_mock.add_response(
         method="POST",
@@ -46,14 +46,14 @@ def test_oauth2_password_credentials_flow_uses_provided_client(
 def test_oauth2_password_credentials_flow_is_able_to_reuse_client(
     token_cache, httpx_mock: HTTPXMock
 ):
-    client = httpx.Client(headers={"x-test": "Test value"})
+    client_auth = httpx_auth.HeaderApiKey(header_name="x-test", api_key="Test value")
     auth = httpx_auth.OktaResourceOwnerPasswordCredentials(
         "testserver.okta-emea.com",
         username="test_user",
         password="test_pwd",
         client_id="test_user2",
         client_secret="test_pwd2",
-        client=client,
+        client_auth=client_auth,
     )
     httpx_mock.add_response(
         method="POST",

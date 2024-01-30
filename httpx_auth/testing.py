@@ -1,3 +1,4 @@
+import typing
 import urllib.request
 import threading
 from urllib.parse import urlsplit
@@ -80,7 +81,7 @@ class BrowserMock:
 
     def open(self, url: str, new: int) -> bool:
         assert new == 1
-        assert url in self.tabs, f"Browser call on {url} was not mocked."
+        assert url in self.tabs, f"Browser call on {url} was not mocked. Mocked urls:\n{'\n'.join(self.tabs.keys())}"
         # Simulate a browser by sending the response in another thread
         self.tabs[url].start()
         return True
@@ -100,7 +101,7 @@ class BrowserMock:
     def assert_checked(self):
         for url, tab in self.tabs.items():
             tab.join()
-            assert tab.checked, f"Response received on {url} was not checked properly."
+            assert tab.checked, f"Response received on {url} was not checked properly. Expected one of:\n{'\n'.join(self.tabs.keys())}"
 
 
 @pytest.fixture
@@ -126,6 +127,15 @@ def token_mock() -> str:
 def token_cache_mock(monkeypatch, token_mock: str):
     class TokenCacheMock:
         def get_token(self, *args, **kwargs) -> str:
+            yield from ()
             return token_mock
 
     monkeypatch.setattr(httpx_auth.OAuth2, "token_cache", TokenCacheMock())
+
+
+def get_token(gen: typing.Generator):
+    try:
+        while True:
+            next(gen)
+    except StopIteration as e:
+        return e.value

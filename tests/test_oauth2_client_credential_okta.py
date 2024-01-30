@@ -9,9 +9,10 @@ from httpx_auth.testing import token_cache
 def test_okta_client_credentials_flow_uses_provided_client(
     token_cache, httpx_mock: HTTPXMock
 ):
-    client = httpx.Client(headers={"x-test": "Test value"})
+    client_auth = httpx_auth.HeaderApiKey(header_name="x-test", api_key="Test value")
     auth = httpx_auth.OktaClientCredentials(
-        "test_okta", client_id="test_user", client_secret="test_pwd", client=client
+        "test_okta", client_id="test_user", client_secret="test_pwd", 
+        client_auth=client_auth,
     )
     httpx_mock.add_response(
         method="POST",
